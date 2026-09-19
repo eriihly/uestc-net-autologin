@@ -1,0 +1,12 @@
+{
+  "username": "",
+  "password": "",
+  "host": "http://110.184.24.61",
+  "probe_url": "http://connect.rom.miui.com/generate_204",
+  "custom_page_id": "",
+  "gateway": {
+    "userip": "",
+    "nasip": "",
+    "mac": ""
+  }
+}
