@@ -97,6 +97,7 @@ Windows 也可以手动配置：在启动文件夹（`Win + R` 输入 `shell:sta
 | `--force` 模式失败 | 网关参数（userip/nasip/mac）已过期，在配置向导中更新（正常模式无需这些参数） |
 | 电脑开了代理/VPN | 会干扰认证检测，使用前请关闭 |
 | 换了学校/认证系统 | 在配置向导高级设置中修改服务器地址；若接口结构不同需改代码 |
+| macOS 提示「Apple 无法验证 start.command」 | 这是系统对下载文件的隔离保护。终端执行 `xattr -d com.apple.quarantine start.command`，或在 系统设置 → 隐私与安全性 → 安全性 中点「仍要打开」 |
 
 ## 安全与隐私
 
