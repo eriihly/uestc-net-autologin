@@ -36,7 +36,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ### 2. 打开控制台（推荐）
 
 ```bash
-python campus_net.py     # 或双击 start.bat（Windows）/ 运行 ./start.sh（Linux·macOS）
+python campus_net.py     # 或双击 start.bat（Windows）/ 双击 start.command（macOS）/ 运行 ./start.sh（Linux）
 ```
 
 浏览器会自动打开可视化控制台，所有操作都在这里完成：
@@ -61,7 +61,7 @@ python campus_net.py --login     # 无界面：检测未认证时自动登录
 python campus_net.py --force     # 强制走一遍完整认证（排障用）
 ```
 
-Windows 用户可直接双击 `start.bat`；Linux / macOS 运行 `./start.sh`（或 `python3 campus_net.py`），认证与控制台功能完全一致。
+Windows 用户可直接双击 `start.bat`；macOS 用户在访达中双击 `start.command`（从 ZIP 解压后首次使用若提示无权限，先在终端执行一次 `chmod +x start.command`），或直接运行 `python3 campus_net.py`；Linux 运行 `./start.sh`（或 `python3 campus_net.py`）。认证与控制台功能各平台完全一致。
 
 ### 4. 开机自动认证（可选）
 
