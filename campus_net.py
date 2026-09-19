@@ -324,59 +324,120 @@ def check_env() -> dict:
     }
 
 
+# ---- 开机自启(按平台实现: Windows 快捷方式 / Linux XDG / macOS LaunchAgent) ----
 _APPDATA = os.environ.get("APPDATA", "")
-STARTUP_DIR = (Path(_APPDATA) / "Microsoft" / "Windows" / "Start Menu"
-               / "Programs" / "Startup") if _APPDATA else None
+WIN_STARTUP_DIR = (Path(_APPDATA) / "Microsoft" / "Windows" / "Start Menu"
+                   / "Programs" / "Startup") if _APPDATA else None
 STARTUP_LNK = "campus-autologin.lnk"
 LEGACY_STARTUP_FILES = ["campus-autologin.bat", "campus_login.bat"]
+LINUX_AUTOSTART = Path.home() / ".config" / "autostart" / "campus-autologin.desktop"
+MAC_AGENT = (Path.home() / "Library" / "LaunchAgents"
+             / "com.campusnet.autologin.plist")
 
 
-def _startup_paths():
-    if STARTUP_DIR is None:
+def _win_startup_paths():
+    if WIN_STARTUP_DIR is None:
         return []
-    return [STARTUP_DIR / name for name in [STARTUP_LNK] + LEGACY_STARTUP_FILES]
+    return [WIN_STARTUP_DIR / name for name in [STARTUP_LNK] + LEGACY_STARTUP_FILES]
+
+
+def _unix_startup_target():
+    """Linux/macOS 的自启动条目路径; 其他系统返回 None"""
+    if sys.platform == "darwin":
+        return MAC_AGENT
+    if sys.platform.startswith("linux"):
+        return LINUX_AUTOSTART
+    return None
 
 
 def startup_enabled() -> bool:
-    return any(p.exists() for p in _startup_paths())
+    if sys.platform.startswith("win"):
+        return any(p.exists() for p in _win_startup_paths())
+    target = _unix_startup_target()
+    return bool(target and target.exists())
+
+
+def _set_startup_windows(enabled: bool):
+    WIN_STARTUP_DIR.mkdir(parents=True, exist_ok=True)
+    if enabled:
+        runner = Path(sys.executable).with_name("pythonw.exe")
+        if not runner.exists():
+            runner = Path(sys.executable)
+        lnk = WIN_STARTUP_DIR / STARTUP_LNK
+        args = f'"{ROOT / "campus_net.py"}" --login'
+        ps = (
+            "$ws = New-Object -ComObject WScript.Shell; "
+            f"$lnk = $ws.CreateShortcut('{lnk}'); "
+            f"$lnk.TargetPath = '{runner}'; "
+            f"$lnk.Arguments = '{args}'; "
+            f"$lnk.WorkingDirectory = '{ROOT}'; "
+            "$lnk.Save()"
+        )
+        encoded = base64.b64encode(ps.encode("utf-16-le")).decode()
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                        "-EncodedCommand", encoded],
+                       check=True, capture_output=True, timeout=60)
+        # 清理旧的 bat 启动项, 避免与新快捷方式重复执行
+        for name in LEGACY_STARTUP_FILES:
+            old = WIN_STARTUP_DIR / name
+            if old.exists():
+                old.unlink()
+        return True, ""
+    for path in _win_startup_paths():
+        if path.exists():
+            path.unlink()
+    return True, ""
 
 
 def set_startup(enabled: bool):
     """开启/关闭开机自动认证, 返回 (是否成功, 错误信息)
 
-    使用快捷方式直接启动 pythonw.exe: 无控制台、开机不会闪现 cmd 窗口。
+    Windows: 启动文件夹快捷方式(直接拉起 pythonw, 无窗口)
+    Linux:   XDG autostart (~/.config/autostart/*.desktop)
+    macOS:   LaunchAgent (~/Library/LaunchAgents/*.plist)
     """
-    if STARTUP_DIR is None:
-        return False, "开机自动连接仅支持 Windows 系统"
     try:
-        STARTUP_DIR.mkdir(parents=True, exist_ok=True)
+        if sys.platform.startswith("win"):
+            return _set_startup_windows(enabled)
+        target = _unix_startup_target()
+        if target is None:
+            return False, f"暂不支持的系统: {sys.platform}"
         if enabled:
-            runner = Path(sys.executable).with_name("pythonw.exe")
-            if not runner.exists():
-                runner = Path(sys.executable)
-            lnk = STARTUP_DIR / STARTUP_LNK
-            args = f'"{ROOT / "campus_net.py"}" --login'
-            ps = (
-                "$ws = New-Object -ComObject WScript.Shell; "
-                f"$lnk = $ws.CreateShortcut('{lnk}'); "
-                f"$lnk.TargetPath = '{runner}'; "
-                f"$lnk.Arguments = '{args}'; "
-                f"$lnk.WorkingDirectory = '{ROOT}'; "
-                "$lnk.Save()"
-            )
-            encoded = base64.b64encode(ps.encode("utf-16-le")).decode()
-            subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
-                            "-EncodedCommand", encoded],
-                           check=True, capture_output=True, timeout=60)
-            # 清理旧的 bat 启动项, 避免与新快捷方式重复执行
-            for name in LEGACY_STARTUP_FILES:
-                old = STARTUP_DIR / name
-                if old.exists():
-                    old.unlink()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            runner = sys.executable or "python3"
+            script = ROOT / "campus_net.py"
+            if sys.platform == "darwin":
+                content = (
+                    '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                    '<plist version="1.0">\n<dict>\n'
+                    '    <key>Label</key>\n'
+                    '    <string>com.campusnet.autologin</string>\n'
+                    '    <key>ProgramArguments</key>\n'
+                    '    <array>\n'
+                    f'        <string>{runner}</string>\n'
+                    f'        <string>{script}</string>\n'
+                    '        <string>--login</string>\n'
+                    '    </array>\n'
+                    '    <key>RunAtLoad</key>\n'
+                    '    <true/>\n'
+                    '</dict>\n</plist>\n'
+                )
+            else:
+                content = (
+                    "[Desktop Entry]\n"
+                    "Type=Application\n"
+                    "Name=Campus Net Autologin\n"
+                    "Comment=Auto login for campus network\n"
+                    f'Exec="{runner}" "{script}" --login\n'
+                    "Terminal=false\n"
+                    "X-GNOME-Autostart-enabled=true\n"
+                )
+            target.write_text(content, encoding="utf-8")
         else:
-            for path in _startup_paths():
-                if path.exists():
-                    path.unlink()
+            if target.exists():
+                target.unlink()
         return True, ""
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"操作失败: {exc}"

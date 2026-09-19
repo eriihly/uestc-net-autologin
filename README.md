@@ -10,7 +10,7 @@
 
 - **秒级认证**：复刻登录流程为纯 HTTP 请求，无需打开浏览器
 - **单文件应用**：`campus_net.py` 一个文件搞定全部功能（网页控制台 + 命令行）
-- **开机自启**：控制台开关一键配置，联网无需等待
+- **开机自启**：控制台开关一键配置（Windows / Linux / macOS 均支持），联网无需等待
 - **不含任何个人信息**：账号密码保存在本地 `config.json`（已被 `.gitignore` 排除）
 
 ## 快速开始
@@ -36,7 +36,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ### 2. 打开控制台（推荐）
 
 ```bash
-python campus_net.py     # 或双击 start.bat
+python campus_net.py     # 或双击 start.bat（Windows）/ 运行 ./start.sh（Linux·macOS）
 ```
 
 浏览器会自动打开可视化控制台，所有操作都在这里完成：
@@ -61,15 +61,15 @@ python campus_net.py --login     # 无界面：检测未认证时自动登录
 python campus_net.py --force     # 强制走一遍完整认证（排障用）
 ```
 
-Windows 用户可直接双击 `start.bat`（打开控制台）。
+Windows 用户可直接双击 `start.bat`；Linux / macOS 运行 `./start.sh`（或 `python3 campus_net.py`），认证与控制台功能完全一致。
 
-### 4. 开机自动认证（可选，Windows）
+### 4. 开机自动认证（可选）
 
-**推荐**：在控制台打开「开机自动连接」开关，一键完成（可随时关闭）。
+**推荐**：在控制台打开「开机自动连接」开关，一键完成（可随时关闭）。各平台均使用系统原生机制、无需管理员权限：Windows 写启动文件夹快捷方式；Linux 写 XDG autostart（`~/.config/autostart/`）；macOS 写 LaunchAgent（`~/Library/LaunchAgents/`）。
 
 开启后：开机认证**静默运行**（不弹任何窗口），运行日志写入项目目录下的 `login.log`（超 100KB 自动截断），排查问题时可直接查看。
 
-也可以手动配置：在启动文件夹（`Win + R` 输入 `shell:startup`）新建一个指向 `pythonw.exe` 的快捷方式，参数填 `campus_net.py --login`（相比批处理，快捷方式开机运行不会闪现命令行窗口）。
+Windows 也可以手动配置：在启动文件夹（`Win + R` 输入 `shell:startup`）新建一个指向 `pythonw.exe` 的快捷方式，参数填 `campus_net.py --login`（相比批处理，快捷方式开机运行不会闪现命令行窗口）。
 
 开机后脚本会自动等待网络就绪并完成认证（内置重试与等待逻辑）。
 
