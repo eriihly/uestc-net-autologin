@@ -144,8 +144,28 @@ def aes_encrypt_b64(key_b64: str, plaintext: str) -> str:
     return base64.b64encode(cipher.encrypt(pad(plaintext.encode(), 16))).decode()
 
 
+def _remember_gateway(userip: str, nasip: str):
+    """把 nasip / userip 写回 config.json, 使之后的开机都能走快速通道"""
+    try:
+        data = (json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+                if CONFIG_FILE.exists() else {})
+    except (OSError, json.JSONDecodeError):
+        return
+    gw = dict(data.get("gateway") or {})
+    if userip:
+        gw["userip"] = userip
+    if nasip:
+        gw["nasip"] = nasip
+    data["gateway"] = gw
+    try:
+        CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                               encoding="utf-8")
+    except OSError:
+        pass
+
+
 def fast_login(force: bool = False) -> bool:
-    """纯 HTTP 认证, 正常情况 < 2 秒 (调用前请确保已配置且网络就绪)"""
+    """纯 HTTP 认证, 正常 < 1 秒 (调用前请确保已配置且网络就绪)"""
     import requests
     cfg = get_config(strict=True)
     username = cfg.get("username", "")
@@ -157,16 +177,121 @@ def fast_login(force: bool = False) -> bool:
     s = requests.Session()
     s.headers.update(HEADERS)
 
-    # ---- 1. 获取会话: 探测地址被网关劫持, 从跳转链中提取参数 ----
+    def _extract_session(urls):
+        return re.search(r"sessionId=([0-9a-f]{8,})", " ".join(urls))
+
+    def _first(urls, *pats):
+        text = " ".join(urls)
+        for p in pats:
+            m = re.search(p, text)
+            if m:
+                return m.group(1)
+        return ""
+
+    def _entry_url(userip, nasip, mac):
+        """网关入口地址(直接访问它可跳过外部探测的多跳跳转)"""
+        return (f"{host}/eportal/index.jsp?userip={userip}&wlanacname="
+                f"&nasip={nasip}&wlanparameter={mac}&url={urllib.parse.quote(probe)}")
+
+    def _do_login(sid, userip, nasip, page_id):
+        """拿到会话参数后执行 CAS 登录(步骤 2~5), 返回是否成功"""
+        # ---- 2. 获取 SSO 登录页, 解析加密密钥 ----
+        cas_url = (f"{host}/cas-sso/login?flowSessionId={sid}&customPageId={page_id}"
+                   f"&preview=false&appType=normal&language=zh-CN"
+                   f"&timer={int(time.time()*1000)}&nasIp={nasip}&userIp={userip}"
+                   f"&accept-language=zh-CN")
+        try:
+            r2 = s.get(cas_url, timeout=TIMEOUT)
+        except requests.RequestException as e:
+            print(f"[!] 获取登录页失败: {e}")
+            return False
+
+        key_m = re.search(r'id="login-croypto"[^>]*>([^<]+)<', r2.text)
+        flow_m = re.search(r'id="login-page-flowkey"[^>]*>([^<]+)<', r2.text)
+        if not key_m or not flow_m:
+            print("[!] 登录页结构异常(未找到密钥), 该站可能非本工具适配的认证系统")
+            return False
+        key, flowkey = key_m.group(1).strip(), flow_m.group(1).strip()
+
+        # ---- 3. 提交认证 ----
+        form = {
+            "username": username,
+            "type": "UsernamePassword",
+            "password": aes_encrypt_b64(key, password),
+            "croypto": key,
+            "captcha_payload": aes_encrypt_b64(key, "{}"),
+            "execution": flowkey,
+            "_eventId": "submit",
+            "geolocation": "",
+        }
+        r3 = s.post(cas_url, data=form, timeout=TIMEOUT, allow_redirects=False,
+                    headers={"Referer": cas_url, "Origin": host})
+        loc = r3.headers.get("Location", "")
+        if r3.status_code != 302 or "ticket=" not in loc:
+            print(f"[!] 提交认证未成功 (状态码 {r3.status_code}), 请检查账号密码")
+            return False
+        print("[√] 凭据已被接受, 票据已签发")
+
+        # ---- 4. 完成认证流程, 确认会话是否真正上线 ----
+        session_online = False
+        try:
+            s.get(urllib.parse.urljoin(cas_url, loc), timeout=TIMEOUT)
+            s.post(f"{host}/eportal/workFlow/getCurrentNode", timeout=TIMEOUT,
+                   json={"sessionId": sid, "flowKey": "portal_auth"},
+                   headers={"Content-Type": "application/json"})
+            r_online = s.post(f"{host}/eportal/network/userOnline", timeout=TIMEOUT,
+                              json={"sessionId": sid},
+                              headers={"Content-Type": "application/json"})
+            session_online = bool((r_online.json().get("data") or {}).get("online"))
+        except (requests.RequestException, ValueError):
+            pass
+
+        if session_online:
+            print("[√] 门户会话已上线")
+        else:
+            # 设备已在线时 NAS 会拒绝重复认证(ACK_AUTH_REFUSE), 属正常情况
+            print("[!] 门户会话未建立(设备可能已在线), 以实际联网状态为准")
+
+        # ---- 5. 等待联网生效(最多 15 秒, 轮询间隔 0.3 秒) ----
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if check_online():
+                return True
+            time.sleep(0.3)
+        return check_online()
+
+    # ---- 1a. 快速通道: 用缓存的 nasip 直连网关入口, 单个请求即可拿到会话(约 0.02 秒)
+    #      相比"外部探测地址被劫持 → 多跳跳转"可省约 2 秒; 拿不到则退回标准链路 ----
+    gw_nasip = (gateway.get("nasip") or "").strip()
+    if gw_nasip and not force:
+        try:
+            r0 = s.get(_entry_url(gateway.get("userip") or "127.0.0.1", gw_nasip,
+                                  gateway.get("mac") or ""),
+                       timeout=3, allow_redirects=False)
+            loc0 = r0.headers.get("Location", "")
+            m0 = _extract_session([loc0])
+        except requests.RequestException:
+            m0 = None
+        if m0:
+            f_sid = m0.group(1)
+            f_ip = _first([loc0], r"userIp=([\d.]+)", r"userip=([\d.]+)")
+            f_nas = _first([loc0], r"nasIp=([\d.]+)", r"nasip=([\d.]+)") or gw_nasip
+            f_page = (_first([loc0], r"customPageId=([0-9a-f]+)")
+                      or (cfg.get("custom_page_id") or ""))
+            print(f"[*] 会话 {f_sid} (快速通道, ip={f_ip})")
+            if _do_login(f_sid, f_ip, f_nas, f_page):
+                _remember_gateway(f_ip, f_nas)
+                return True
+            print("[!] 快速通道未成功, 改用标准链路重试")
+
+    # ---- 1b. 标准链路: 探测地址被网关劫持(force 模式则直连入口) ----
     if force:
         gw_userip = gateway.get("userip") or "127.0.0.1"
         gw_nasip = gateway.get("nasip") or ""
         gw_mac = gateway.get("mac") or ""
         try:
-            r = s.get(
-                f"{host}/eportal/index.jsp?userip={gw_userip}&wlanacname="
-                f"&nasip={gw_nasip}&wlanparameter={gw_mac}&url={urllib.parse.quote(probe)}",
-                timeout=TIMEOUT, allow_redirects=True)
+            r = s.get(_entry_url(gw_userip, gw_nasip, gw_mac),
+                      timeout=TIMEOUT, allow_redirects=True)
         except requests.RequestException as e:
             print(f"[!] 无法连接认证服务器, 请确认已连接校园网: {e}")
             return False
@@ -178,9 +303,6 @@ def fast_login(force: bool = False) -> bool:
             print(f"[!] 访问探测地址失败: {e}")
             return False
         chain = [probe] + [h.headers.get("Location", "") for h in r.history] + [r.url]
-
-    def _extract_session(urls):
-        return re.search(r"sessionId=([0-9a-f]{8,})", " ".join(urls))
 
     m = _extract_session(chain)
     if not m:
@@ -209,79 +331,15 @@ def fast_login(force: bool = False) -> bool:
 
     joined = " ".join(chain)        # 供下方提取其余网关参数(含重试后的最终链)
     sid = m.group(1)
+    userip = _first([joined], r"userIp=([\d.]+)", r"userip=([\d.]+)") or gateway.get("userip", "")
+    nasip = _first([joined], r"nasIp=([\d.]+)", r"nasip=([\d.]+)") or gateway.get("nasip", "")
+    page_id = _first([joined], r"customPageId=([0-9a-f]+)") or (cfg.get("custom_page_id") or "")
+    print(f"[*] 会话 {sid} (标准链路, ip={userip})")
 
-    m2 = re.search(r"userIp=([\d.]+)", joined) or re.search(r"userip=([\d.]+)", joined)
-    userip = m2.group(1) if m2 else gateway.get("userip", "")
-    m3 = re.search(r"nasIp=([\d.]+)", joined) or re.search(r"nasip=([\d.]+)", joined)
-    nasip = m3.group(1) if m3 else gateway.get("nasip", "")
-    m4 = re.search(r"customPageId=([0-9a-f]+)", joined)
-    page_id = m4.group(1) if m4 else (cfg.get("custom_page_id") or "")
-    print(f"[*] 会话 {sid} (ip={userip})")
-
-    # ---- 2. 获取 SSO 登录页, 解析加密密钥 ----
-    cas_url = (f"{host}/cas-sso/login?flowSessionId={sid}&customPageId={page_id}"
-               f"&preview=false&appType=normal&language=zh-CN"
-               f"&timer={int(time.time()*1000)}&nasIp={nasip}&userIp={userip}"
-               f"&accept-language=zh-CN")
-    try:
-        r2 = s.get(cas_url, timeout=TIMEOUT)
-    except requests.RequestException as e:
-        print(f"[!] 获取登录页失败: {e}")
-        return False
-
-    key_m = re.search(r'id="login-croypto"[^>]*>([^<]+)<', r2.text)
-    flow_m = re.search(r'id="login-page-flowkey"[^>]*>([^<]+)<', r2.text)
-    if not key_m or not flow_m:
-        print("[!] 登录页结构异常(未找到密钥), 该站可能非本工具适配的认证系统")
-        return False
-    key, flowkey = key_m.group(1).strip(), flow_m.group(1).strip()
-
-    # ---- 3. 提交认证 ----
-    form = {
-        "username": username,
-        "type": "UsernamePassword",
-        "password": aes_encrypt_b64(key, password),
-        "croypto": key,
-        "captcha_payload": aes_encrypt_b64(key, "{}"),
-        "execution": flowkey,
-        "_eventId": "submit",
-        "geolocation": "",
-    }
-    r3 = s.post(cas_url, data=form, timeout=TIMEOUT, allow_redirects=False,
-                headers={"Referer": cas_url, "Origin": host})
-    loc = r3.headers.get("Location", "")
-    if r3.status_code != 302 or "ticket=" not in loc:
-        print(f"[!] 提交认证未成功 (状态码 {r3.status_code}), 请检查账号密码")
-        return False
-    print("[√] 凭据已被接受, 票据已签发")
-
-    # ---- 4. 完成认证流程, 确认会话是否真正上线 ----
-    session_online = False
-    try:
-        s.get(urllib.parse.urljoin(cas_url, loc), timeout=TIMEOUT)
-        s.post(f"{host}/eportal/workFlow/getCurrentNode", timeout=TIMEOUT,
-               json={"sessionId": sid, "flowKey": "portal_auth"},
-               headers={"Content-Type": "application/json"})
-        r_online = s.post(f"{host}/eportal/network/userOnline", timeout=TIMEOUT,
-                          json={"sessionId": sid},
-                          headers={"Content-Type": "application/json"})
-        session_online = bool((r_online.json().get("data") or {}).get("online"))
-    except (requests.RequestException, ValueError):
-        pass
-
-    if session_online:
-        print("[√] 门户会话已上线")
-    else:
-        # 设备已在线时 NAS 会拒绝重复认证(ACK_AUTH_REFUSE), 属正常情况
-        print("[!] 门户会话未建立(设备可能已在线), 以实际联网状态为准")
-
-    # ---- 5. 等待联网生效(最多 15 秒, 轮询间隔 0.3 秒) ----
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        if check_online():
-            return True
-        time.sleep(0.3)
-    return check_online()
+    if _do_login(sid, userip, nasip, page_id):
+        _remember_gateway(userip, nasip)
+        return True
+    return False
 
 
 def capture_login(force: bool = False) -> dict:
