@@ -193,7 +193,7 @@ def fast_login(force: bool = False) -> bool:
         return (f"{host}/eportal/index.jsp?userip={userip}&wlanacname="
                 f"&nasip={nasip}&wlanparameter={mac}&url={urllib.parse.quote(probe)}")
 
-    def _do_login(sid, userip, nasip, page_id):
+    def _do_login(sid, userip, nasip, page_id, online_wait_s=15):
         """拿到会话参数后执行 CAS 登录(步骤 2~5), 返回是否成功"""
         # ---- 2. 获取 SSO 登录页, 解析加密密钥 ----
         cas_url = (f"{host}/cas-sso/login?flowSessionId={sid}&customPageId={page_id}"
@@ -252,21 +252,34 @@ def fast_login(force: bool = False) -> bool:
             # 设备已在线时 NAS 会拒绝重复认证(ACK_AUTH_REFUSE), 属正常情况
             print("[!] 门户会话未建立(设备可能已在线), 以实际联网状态为准")
 
-        # ---- 5. 等待联网生效(最多 15 秒, 轮询间隔 0.3 秒) ----
-        deadline = time.time() + 15
+        # ---- 5. 等待联网生效(轮询间隔 0.3 秒) ----
+        deadline = time.time() + online_wait_s
         while time.time() < deadline:
             if check_online():
                 return True
             time.sleep(0.3)
         return check_online()
 
+    def _local_ip():
+        """本机当前使用的 IPv4: 快速通道的 userip 必须用当前 IP(缓存的会过期)"""
+        import socket
+        try:
+            sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sk.connect((urllib.parse.urlsplit(host).hostname or "127.0.0.1", 80))
+                return sk.getsockname()[0]
+            finally:
+                sk.close()
+        except OSError:
+            return ""
+
     # ---- 1a. 快速通道: 用缓存的 nasip 直连网关入口, 单个请求即可拿到会话(约 0.02 秒)
     #      相比"外部探测地址被劫持 → 多跳跳转"可省约 2 秒; 拿不到则退回标准链路 ----
     gw_nasip = (gateway.get("nasip") or "").strip()
     if gw_nasip and not force:
+        cur_ip = _local_ip() or gateway.get("userip") or "127.0.0.1"
         try:
-            r0 = s.get(_entry_url(gateway.get("userip") or "127.0.0.1", gw_nasip,
-                                  gateway.get("mac") or ""),
+            r0 = s.get(_entry_url(cur_ip, gw_nasip, gateway.get("mac") or ""),
                        timeout=3, allow_redirects=False)
             loc0 = r0.headers.get("Location", "")
             m0 = _extract_session([loc0])
@@ -274,12 +287,13 @@ def fast_login(force: bool = False) -> bool:
             m0 = None
         if m0:
             f_sid = m0.group(1)
-            f_ip = _first([loc0], r"userIp=([\d.]+)", r"userip=([\d.]+)")
+            f_ip = _first([loc0], r"userIp=([\d.]+)", r"userip=([\d.]+)") or cur_ip
             f_nas = _first([loc0], r"nasIp=([\d.]+)", r"nasip=([\d.]+)") or gw_nasip
             f_page = (_first([loc0], r"customPageId=([0-9a-f]+)")
                       or (cfg.get("custom_page_id") or ""))
             print(f"[*] 会话 {f_sid} (快速通道, ip={f_ip})")
-            if _do_login(f_sid, f_ip, f_nas, f_page):
+            # 快速通道最多等 5 秒生效, 不成功立即退回标准链路(避免干等 15 秒)
+            if _do_login(f_sid, f_ip, f_nas, f_page, online_wait_s=5):
                 _remember_gateway(f_ip, f_nas)
                 return True
             print("[!] 快速通道未成功, 改用标准链路重试")
