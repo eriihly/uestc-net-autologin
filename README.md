@@ -61,7 +61,15 @@ python campus_net.py --login     # 无界面：检测未认证时自动登录
 python campus_net.py --force     # 强制走一遍完整认证（排障用）
 ```
 
-Windows 用户可直接双击 `start.bat`；macOS 用户在访达中双击 `start.command`（从 ZIP 解压后首次使用若提示无权限，先在终端执行一次 `chmod +x start.command`），或直接运行 `python3 campus_net.py`；Linux 运行 `./start.sh`（或 `python3 campus_net.py`）。认证与控制台功能各平台完全一致。
+Windows 用户可直接双击 `start.bat`；macOS 用户在访达中双击 `start.command`；Linux 运行 `./start.sh`（或各平台直接 `python3 campus_net.py`）。认证与控制台功能各平台完全一致。
+
+> **🍎 macOS 用户必读**：从浏览器下载的 ZIP，首次双击 `start.command` 会被系统拦截（提示"Apple 无法验证…"）——这是 macOS 对所有未签名下载文件的保护机制（不是误报病毒），**处理一次即可**，二选一：
+>
+> - **方式 A（纯鼠标，不碰终端）**：双击被拦截后先点「完成」→ 打开「**系统设置 → 隐私与安全性**」→ 往下拉到「安全性」区域 → 点「**仍要打开**」→ 输入开机密码 → 再次双击 `start.command` 即可
+> - **方式 B（终端一行命令）**：打开「终端」，把下面**整行**复制粘贴后回车（路径改成你的解压位置；小技巧：先输入 `cd ` 再把文件夹拖进终端窗口，路径会自动补全）：
+>   ```bash
+>   cd ~/Downloads/campus-net-autologin && chmod +x start.command start.sh && xattr -d com.apple.quarantine start.command && ./start.command
+>   ```
 
 ### 4. 开机自动认证（可选）
 

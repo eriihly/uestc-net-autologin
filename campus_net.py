@@ -120,15 +120,19 @@ def check_online() -> bool:
 
 
 def wait_network_ready(timeout_s: int = 15) -> bool:
-    """开机场景: 等待网卡/校园网就绪(能连上认证服务器), 最多 15 秒"""
+    """开机场景: 等待网卡/校园网就绪(能连上认证服务器), 最多 15 秒
+
+    单次超时 1.5 秒 + 重试间隔 0.5 秒: 网络一通就能立刻发现,
+    而不是每轮干等 5 秒超时再等 3 秒(原先网络 1 秒后就绪也要等 8 秒才被感知)。
+    """
     import requests
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
-            requests.get(get_host() + "/", timeout=5, allow_redirects=False)
+            requests.get(get_host() + "/", timeout=1.5, allow_redirects=False)
             return True
         except requests.RequestException:
-            time.sleep(3)
+            time.sleep(0.5)
     return False
 
 
@@ -271,12 +275,12 @@ def fast_login(force: bool = False) -> bool:
         # 设备已在线时 NAS 会拒绝重复认证(ACK_AUTH_REFUSE), 属正常情况
         print("[!] 门户会话未建立(设备可能已在线), 以实际联网状态为准")
 
-    # ---- 5. 等待联网生效(最多 15 秒) ----
+    # ---- 5. 等待联网生效(最多 15 秒, 轮询间隔 0.3 秒) ----
     deadline = time.time() + 15
     while time.time() < deadline:
         if check_online():
             return True
-        time.sleep(1)
+        time.sleep(0.3)
     return check_online()
 
 
