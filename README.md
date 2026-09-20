@@ -59,6 +59,7 @@ python campus_net.py     # 或双击 start.bat（Windows）/ 双击 start.comman
 ```bash
 python campus_net.py --login     # 无界面：检测未认证时自动登录
 python campus_net.py --force     # 强制走一遍完整认证（排障用）
+python campus_net.py --logout    # 下线：断开当前认证（测试/临时使用）
 ```
 
 Windows 用户可直接双击 `start.bat`；macOS 用户在访达中双击 `start.command`；Linux 运行 `./start.sh`（或各平台直接 `python3 campus_net.py`）。认证与控制台功能各平台完全一致。

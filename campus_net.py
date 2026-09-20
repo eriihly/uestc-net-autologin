@@ -7,6 +7,7 @@
     python campus_net.py            # 启动网页控制台(环境安装/账号配置/开机自启/连接)
     python campus_net.py --login    # 无界面直接认证(供开机自启使用)
     python campus_net.py --force    # 强制完整认证一次(排障用)
+    python campus_net.py --logout   # 下线: 断开当前认证
 
 首次使用: 运行 python campus_net.py, 在网页控制台中完成配置
 """
@@ -353,6 +354,102 @@ def fast_login(force: bool = False) -> bool:
     if _do_login(sid, userip, nasip, page_id):
         _remember_gateway(userip, nasip)
         return True
+    return False
+
+
+def fast_logout() -> bool:
+    """下线: 先在该会话上完成登录(门户下线接口要求会话处于在线状态), 再调用下线接口"""
+    import socket
+
+    import requests
+    cfg = get_config(strict=True)
+    username = cfg.get("username", "")
+    password = cfg.get("password", "")
+    host = get_host()
+    probe = get_probe_url()
+    gateway = get_gateway()
+
+    s = requests.Session()
+    s.headers.update(HEADERS)
+
+    # 1. 拿会话(入口直连; userip 用当前本机 IP)
+    try:
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sk.connect((urllib.parse.urlsplit(host).hostname or "127.0.0.1", 80))
+            userip = sk.getsockname()[0]
+        finally:
+            sk.close()
+    except OSError:
+        userip = gateway.get("userip") or "127.0.0.1"
+    entry = (f"{host}/eportal/index.jsp?userip={userip}&wlanacname="
+             f"&nasip={gateway.get('nasip') or ''}&wlanparameter={gateway.get('mac') or ''}"
+             f"&url={urllib.parse.quote(probe)}")
+    try:
+        r0 = s.get(entry, timeout=5, allow_redirects=False)
+    except requests.RequestException as e:
+        print(f"[!] 无法连接认证服务器: {e}")
+        return False
+    loc0 = r0.headers.get("Location", "")
+    m = re.search(r"sessionId=([0-9a-f]{8,})", loc0)
+    if not m:
+        print("[!] 未取到会话(不在校园网内或网关参数缺失)")
+        return False
+    sid = m.group(1)
+    m2 = re.search(r"customPageId=([0-9a-f]+)", loc0)
+    page_id = m2.group(1) if m2 else (cfg.get("custom_page_id") or "")
+    m3 = re.search(r"nasIp=([\d.]+)", loc0)
+    nasip = m3.group(1) if m3 else (gateway.get("nasip") or "")
+
+    # 2. 在该会话上完成登录(下线接口对未登录会话无效, 已实测)
+    cas_url = (f"{host}/cas-sso/login?flowSessionId={sid}&customPageId={page_id}"
+               f"&preview=false&appType=normal&language=zh-CN"
+               f"&timer={int(time.time()*1000)}&nasIp={nasip}&userIp={userip}"
+               f"&accept-language=zh-CN")
+    try:
+        r1 = s.get(cas_url, timeout=TIMEOUT)
+    except requests.RequestException as e:
+        print(f"[!] 获取登录页失败: {e}")
+        return False
+    key_m = re.search(r'id="login-croypto"[^>]*>([^<]+)<', r1.text)
+    flow_m = re.search(r'id="login-page-flowkey"[^>]*>([^<]+)<', r1.text)
+    if key_m and flow_m:
+        key = key_m.group(1).strip()
+        form = {
+            "username": username,
+            "type": "UsernamePassword",
+            "password": aes_encrypt_b64(key, password),
+            "croypto": key,
+            "captcha_payload": aes_encrypt_b64(key, "{}"),
+            "execution": flow_m.group(1).strip(),
+            "_eventId": "submit",
+            "geolocation": "",
+        }
+        try:
+            s.post(cas_url, data=form, timeout=TIMEOUT, allow_redirects=False,
+                   headers={"Referer": cas_url, "Origin": host})
+        except requests.RequestException:
+            pass
+
+    # 3. 调用官方下线接口
+    try:
+        r2 = s.post(f"{host}/eportal/network/offline", timeout=TIMEOUT,
+                    json={"sessionId": sid},
+                    headers={"Content-Type": "application/json",
+                             "Referer": host + "/portal/"})
+    except requests.RequestException as e:
+        print(f"[!] 下线请求失败: {e}")
+        return False
+    print(f"[*] 下线请求已发送 (HTTP {r2.status_code})")
+
+    # 4. 等待断开生效(最多 8 秒)
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if not check_online():
+            print("[√] 已下线, 网络已断开")
+            return True
+        time.sleep(0.5)
+    print("[!] 请求已被接受, 但设备仍在线(可能被网络自动重连)")
     return False
 
 
@@ -1164,6 +1261,18 @@ def run_console():
 
 
 def main():
+    if "--logout" in sys.argv:
+        setup_logging()
+        print("[*] 正在下线...")
+        try:
+            ok = fast_logout()
+        except Exception as exc:
+            print(f"[!] 下线异常: {exc}")
+            ok = False
+        if not ok:
+            print("[×] 下线未成功")
+        return
+
     if "--login" in sys.argv or "--force" in sys.argv:
         force = "--force" in sys.argv
         setup_logging()
