@@ -194,7 +194,8 @@ def fast_login(force: bool = False) -> bool:
         return (f"{host}/eportal/index.jsp?userip={userip}&wlanacname="
                 f"&nasip={nasip}&wlanparameter={mac}&url={urllib.parse.quote(probe)}")
 
-    def _do_login(sid, userip, nasip, page_id, online_wait_s=15):
+    def _do_login(sid, userip, nasip, page_id, online_wait_s=15,
+                  bail_if_not_online=False):
         """拿到会话参数后执行 CAS 登录(步骤 2~5), 返回是否成功"""
         # ---- 2. 获取 SSO 登录页, 解析加密密钥 ----
         cas_url = (f"{host}/cas-sso/login?flowSessionId={sid}&customPageId={page_id}"
@@ -249,6 +250,14 @@ def fast_login(force: bool = False) -> bool:
 
         if session_online:
             print("[√] 门户会话已上线")
+        elif bail_if_not_online:
+            # 门户未把本会话记录为在线: 设备实际在线则直接成功, 否则无需等待、立即退回
+            # (刚下线后网关存在短暂缓冲窗口, 该窗口内等待无意义)
+            if check_online():
+                print("[√] 网络实际已连通")
+                return True
+            print("[!] 会话未被网关放行(可能处于下线缓冲窗口)")
+            return False
         else:
             # 设备已在线时 NAS 会拒绝重复认证(ACK_AUTH_REFUSE), 属正常情况
             print("[!] 门户会话未建立(设备可能已在线), 以实际联网状态为准")
@@ -293,9 +302,9 @@ def fast_login(force: bool = False) -> bool:
             f_page = (_first([loc0], r"customPageId=([0-9a-f]+)")
                       or (cfg.get("custom_page_id") or ""))
             print(f"[*] 会话 {f_sid} (快速通道, ip={f_ip})")
-            # 快速通道最多等 3 秒生效, 不成功立即退回标准链路
-            # (刚下线后网关需要短暂缓冲, 该窗口内首试可能不放行, 由兜底链路接手)
-            if _do_login(f_sid, f_ip, f_nas, f_page, online_wait_s=3):
+            # 会话未被网关记录为在线时立即退回(无需等待); 被记录为在线则最多等 3 秒生效
+            if _do_login(f_sid, f_ip, f_nas, f_page, online_wait_s=3,
+                         bail_if_not_online=True):
                 _remember_gateway(f_ip, f_nas)
                 return True
             print("[!] 快速通道未成功, 改用标准链路重试")
