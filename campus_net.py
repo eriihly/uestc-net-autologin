@@ -110,11 +110,11 @@ def get_gateway() -> dict:
 #  认证核心
 # ================================================================
 
-def check_online() -> bool:
+def check_online(timeout: float = TIMEOUT) -> bool:
     """联网检测: 认证后探测地址返回 204, 未认证会被网关劫持"""
     import requests
     try:
-        r = requests.get(get_probe_url(), timeout=TIMEOUT, allow_redirects=False)
+        r = requests.get(get_probe_url(), timeout=timeout, allow_redirects=False)
         return r.status_code == 204
     except requests.RequestException:
         return False
@@ -1287,13 +1287,19 @@ def main():
         force = "--force" in sys.argv
         setup_logging()
         if not force:
+            # 开机场景: 网络未就绪时探测请求可能被 DNS/网关拖住数秒, 用短超时快速失败,
+            # 随后由"等待网络就绪"循环接管(短超时+密集轮询, 网络一通立即继续认证)
             print("[*] 检测网络状态...")
-            if check_online():
+            t_phase = time.time()
+            if check_online(timeout=3):
                 print("[√] 已经在线, 无需登录")
                 return
+            print(f"[i] 在线检测用时 {time.time() - t_phase:.1f} 秒")
+            t_phase = time.time()
             if not wait_network_ready():
                 print("[×] 等待网络就绪超时, 请检查网线/WiFi 是否已连接校园网")
                 return
+            print(f"[i] 网络就绪用时 {time.time() - t_phase:.1f} 秒")
         username = get_config(strict=True).get("username", "")
         t0 = time.time()
         print(f"[*] 开始认证 (账号 {username})...")
