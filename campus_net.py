@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
     "host": "http://110.184.24.61",
     "probe_url": "http://connect.rom.miui.com/generate_204",
     "custom_page_id": "",
+    "skip_online_check": False,     # 开机优化: 跳过"是否已在线"检测(省约2秒)
     "gateway": {"userip": "", "nasip": "", "mac": ""},
 }
 
@@ -846,6 +847,13 @@ PAGE_HTML = """<!DOCTYPE html>
         <label for="probe_url">联网探测地址</label>
         <input type="text" id="probe_url" placeholder="http://connect.rom.miui.com/generate_204">
         <div class="hint">网关参数留空即可（正常模式自动获取），仅排障时使用。</div>
+        <label for="skipCheck" style="margin-top:16px">开机优化</label>
+        <label style="display:flex;align-items:center;gap:8px;font-weight:normal;cursor:pointer">
+          <input type="checkbox" id="skipCheck" style="width:auto">
+          <span>跳过在线检测（开机约快 2 秒）</span>
+        </label>
+        <div class="hint">关闭（默认）：开机会先检测"是否已在线"（约 2 秒），任何网络环境下都处理得更稳。<br>
+        开启后：开机少花约 2 秒；但若电脑有时用其他网络（如 Wi-Fi）上网，启动时会多等约 15 秒并在日志记录一次超时——只接校园网的话建议开启。</div>
         <div class="actions" style="margin-top:14px">
           <button class="btn ghost" id="forceBtn" onclick="doForceTest()">执行强制认证测试</button>
         </div>
@@ -991,6 +999,7 @@ async function saveConfig() {
     password: $('password').value,
     host: $('host').value.trim(),
     probe_url: $('probe_url').value.trim(),
+    skip_online_check: $('skipCheck').checked,
     gateway: {
       userip: $('userip').value.trim(),
       nasip: $('nasip').value.trim(),
@@ -1099,6 +1108,7 @@ async function shutdown(e) {
     $('userip').value = (cfg.gateway || {}).userip || '';
     $('nasip').value = (cfg.gateway || {}).nasip || '';
     $('mac').value = (cfg.gateway || {}).mac || '';
+    $('skipCheck').checked = !!cfg.skip_online_check;
   } catch (e) { toast('加载配置失败', false); }
   refreshStatus();
   refreshEnv();
@@ -1149,6 +1159,7 @@ class Handler(BaseHTTPRequestHandler):
                 "has_password": bool(cfg.get("password")),
                 "host": cfg.get("host", ""),
                 "probe_url": cfg.get("probe_url", ""),
+                "skip_online_check": bool(cfg.get("skip_online_check")),
                 "gateway": cfg.get("gateway", {}),
             })
         elif self.path == "/api/status":
@@ -1210,6 +1221,7 @@ class Handler(BaseHTTPRequestHandler):
         current["username"] = username
         current["host"] = (payload.get("host") or "").strip() or DEFAULT_CONFIG["host"]
         current["probe_url"] = (payload.get("probe_url") or "").strip() or DEFAULT_CONFIG["probe_url"]
+        current["skip_online_check"] = bool(payload.get("skip_online_check"))
         gateway = payload.get("gateway") or {}
         current["gateway"] = {
             "userip": (gateway.get("userip") or "").strip(),
@@ -1289,12 +1301,16 @@ def main():
         if not force:
             # 开机场景: 网络未就绪时探测请求可能被 DNS/网关拖住数秒, 用短超时快速失败,
             # 随后由"等待网络就绪"循环接管(短超时+密集轮询, 网络一通立即继续认证)
-            print("[*] 检测网络状态...")
-            t_phase = time.time()
-            if check_online(timeout=3):
-                print("[√] 已经在线, 无需登录")
-                return
-            print(f"[i] 在线检测用时 {time.time() - t_phase:.1f} 秒")
+            # 用户在控制台开启了"跳过在线检测"(开机优化)时, 直接进入就绪等待与认证
+            if get_config().get("skip_online_check"):
+                print("[*] 已按设置跳过在线检测(开机优化)")
+            else:
+                print("[*] 检测网络状态...")
+                t_phase = time.time()
+                if check_online(timeout=3):
+                    print("[√] 已经在线, 无需登录")
+                    return
+                print(f"[i] 在线检测用时 {time.time() - t_phase:.1f} 秒")
             t_phase = time.time()
             if not wait_network_ready():
                 print("[×] 等待网络就绪超时, 请检查网线/WiFi 是否已连接校园网")
