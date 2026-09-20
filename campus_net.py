@@ -293,8 +293,9 @@ def fast_login(force: bool = False) -> bool:
             f_page = (_first([loc0], r"customPageId=([0-9a-f]+)")
                       or (cfg.get("custom_page_id") or ""))
             print(f"[*] 会话 {f_sid} (快速通道, ip={f_ip})")
-            # 快速通道最多等 5 秒生效, 不成功立即退回标准链路(避免干等 15 秒)
-            if _do_login(f_sid, f_ip, f_nas, f_page, online_wait_s=5):
+            # 快速通道最多等 3 秒生效, 不成功立即退回标准链路
+            # (刚下线后网关需要短暂缓冲, 该窗口内首试可能不放行, 由兜底链路接手)
+            if _do_login(f_sid, f_ip, f_nas, f_page, online_wait_s=3):
                 _remember_gateway(f_ip, f_nas)
                 return True
             print("[!] 快速通道未成功, 改用标准链路重试")
