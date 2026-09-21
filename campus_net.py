@@ -111,11 +111,24 @@ def get_gateway() -> dict:
 #  认证核心
 # ================================================================
 
+def _new_session():
+    """统一的 HTTP 会话: 直连校园网, 忽略系统/环境代理
+
+    机器上配置过代理/VPN 时, requests 默认会读取 HTTP_PROXY 及系统代理设置,
+    开机时这些出口往往还不可用, 会把探测/认证请求拖慢甚至阻断; 这里强制直连。
+    """
+    import requests
+    s = requests.Session()
+    s.trust_env = False          # 忽略 HTTP_PROXY/HTTPS_PROXY 与系统代理配置
+    s.headers.update(HEADERS)
+    return s
+
+
 def check_online(timeout: float = TIMEOUT) -> bool:
     """联网检测: 认证后探测地址返回 204, 未认证会被网关劫持"""
     import requests
     try:
-        r = requests.get(get_probe_url(), timeout=timeout, allow_redirects=False)
+        r = _new_session().get(get_probe_url(), timeout=timeout, allow_redirects=False)
         return r.status_code == 204
     except requests.RequestException:
         return False
@@ -124,17 +137,18 @@ def check_online(timeout: float = TIMEOUT) -> bool:
 def wait_network_ready(timeout_s: int = 15) -> bool:
     """开机场景: 等待网卡/校园网就绪(能连上认证服务器), 最多 15 秒
 
-    单次超时 1.5 秒 + 重试间隔 0.5 秒: 网络一通就能立刻发现,
-    而不是每轮干等 5 秒超时再等 3 秒(原先网络 1 秒后就绪也要等 8 秒才被感知)。
+    单次超时 0.8 秒 + 重试间隔 0.2 秒: 网络一通就能更快被感知;
+    复用同一会话并忽略系统代理, 避免代理/VPN 拖慢或阻断探测。
     """
     import requests
+    s = _new_session()
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
-            requests.get(get_host() + "/", timeout=1.5, allow_redirects=False)
+            s.get(get_host() + "/", timeout=0.8, allow_redirects=False)
             return True
         except requests.RequestException:
-            time.sleep(0.5)
+            time.sleep(0.2)
     return False
 
 
@@ -176,8 +190,7 @@ def fast_login(force: bool = False) -> bool:
     probe = get_probe_url()
     gateway = get_gateway()
 
-    s = requests.Session()
-    s.headers.update(HEADERS)
+    s = _new_session()
 
     def _extract_session(urls):
         return re.search(r"sessionId=([0-9a-f]{8,})", " ".join(urls))
@@ -380,8 +393,7 @@ def fast_logout() -> bool:
     probe = get_probe_url()
     gateway = get_gateway()
 
-    s = requests.Session()
-    s.headers.update(HEADERS)
+    s = _new_session()
 
     # 1. 拿会话(入口直连; userip 用当前本机 IP)
     try:
@@ -470,13 +482,22 @@ def capture_login(force: bool = False) -> dict:
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             if not force:
-                if check_online():
-                    print("[√] 已经在线, 无需登录")
-                    return {"ok": True, "output": buf.getvalue().strip()}
+                # 与命令行 --login 保持一致: 尊重"跳过在线检测"(开机优化)
+                if get_config().get("skip_online_check"):
+                    print("[*] 已按设置跳过在线检测(开机优化)")
+                else:
+                    print("[*] 检测网络状态...")
+                    t_phase = time.time()
+                    if check_online(timeout=3):
+                        print("[√] 已经在线, 无需登录")
+                        return {"ok": True, "output": buf.getvalue().strip()}
+                    print(f"[i] 在线检测用时 {time.time() - t_phase:.1f} 秒")
                 # 网页点击场景: 最多等 30 秒(避免按钮长时间无反馈)
+                t_phase = time.time()
                 if not wait_network_ready(timeout_s=30):
                     print("[×] 未检测到校园网(检查网线/WiFi 是否已连接)")
                     return {"ok": False, "output": buf.getvalue().strip()}
+                print(f"[i] 网络就绪用时 {time.time() - t_phase:.1f} 秒")
             ok = fast_login(force)
     except SystemExit:
         ok = False
@@ -679,7 +700,8 @@ def check_network_online() -> bool:
     probe = get_config().get("probe_url") or DEFAULT_CONFIG["probe_url"]
     try:
         req = urllib.request.Request(probe, method="GET")
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=5) as resp:
             return resp.status == 204
     except Exception:
         return False
